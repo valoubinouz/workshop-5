@@ -1,55 +1,152 @@
 import bodyParser from "body-parser";
 import express from "express";
 import { BASE_NODE_PORT } from "../config";
-import { Value, NodeState } from "../types";
+import { NodeState, Value } from "../types";
+import axios from 'axios'; // Importing axios for making HTTP requests
+import * as console from "console";
+import { delay } from "../utils"; // Importing delay function for asynchronous delay
 
-export async function node(
-  nodeId: number, // the ID of the node
-  N: number, // total number of nodes in the network
-  F: number, // number of faulty nodes in the network
-  initialValue: Value, // initial value of the node
-  isFaulty: boolean, // true if the node is faulty, false otherwise
-  nodesAreReady: () => boolean, // used to know if all nodes are ready to receive requests
-  setNodeIsReady: (index: number) => void // this should be called when the node is started and ready to receive requests
+export function node(
+    nodeId: number,
+    N: number,
+    F: number,
+    initialValue: Value,
+    isFaulty: boolean,
+    nodesAreReady: () => boolean,
+    setNodeIsReady: (index: number) => void
 ) {
-  const node = express();
-  node.use(express.json());
-  node.use(bodyParser.json());
+    const node = express();
+    node.use(express.json());
+    node.use(bodyParser.json());
 
-  // status route
+    let nodeState: NodeState = {
+        killed: false,
+        x: null,
+        decided: null,
+        k: null
+    };
+
+    let messagesR: Map<number, any[]> = new Map();
+    let messagesP: Map<number, any[]> = new Map();
+
     node.get("/status", (req, res) => {
-      if (isFaulty) {
-        res.status(500).json({ message: "faulty" });
-      } else {
-        res.status(200).json({ message: "live" });
-      }
+        res.status(isFaulty ? 500 : 200).send(isFaulty ? "faulty" : "live");
     });
 
-  // TODO implement this
-  // this route allows the node to receive messages from other nodes
-  // node.post("/message", (req, res) => {});
+    node.post("/message", (req, res) => {
+        const { k, x, messageType } = req.body;
+        if (!isFaulty && !nodeState.killed) {
+            if (messageType === "R") {
+                handleRequestMessage(k, x);
+            } else if (messageType === "P") {
+                handleProposalMessage(k, x);
+            }
+        }
+        res.status(200).send("message received");
+    });
 
-  // TODO implement this
-  // this route is used to start the consensus algorithm
-  // node.get("/start", async (req, res) => {});
+    function handleRequestMessage(k: number, x: Value) {
+        if (!messagesR.has(k)) {
+            messagesR.set(k, []);
+        }
+        messagesR.get(k)!.push(x);
+        const messageR = messagesR.get(k)!;
+        if (messageR.length >= (N - F)) {
+            const { countZero, countOne } = countOccurrences(messageR);
+            const newX = determineNewValue(countZero, countOne);
+            sendProposalMessages(k, newX);
+        }
+    }
 
-  // TODO implement this
-  // this route is used to stop the consensus algorithm
-  // node.get("/stop", async (req, res) => {});
+    function handleProposalMessage(k: number, x: Value) {
+        if (!messagesP.has(k)) {
+            messagesP.set(k, []);
+        }
+        messagesP.get(k)!.push(x);
+        const messageP = messagesP.get(k)!;
+        if (messageP.length >= N - F) {
+            const { countZero, countOne } = countOccurrences(messageP);
+            if (countZero >= F + 1) {
+                nodeState.x = 0;
+                nodeState.decided = true;
+            } else if (countOne >= F + 1) {
+                nodeState.x = 1;
+                nodeState.decided = true;
+            } else {
+                nodeState.x = determineNewValue(countZero, countOne);
+                nodeState.k = k + 1;
+                sendRequestMessages(nodeState.k, nodeState.x);
+            }
+        }
+    }
 
-  // TODO implement this
-  // get the current state of a node
-  // node.get("/getState", (req, res) => {});
+    function countOccurrences(message: Value[]): { countZero: number; countOne: number } {
+        const countZero = message.filter(el => el === 0).length;
+        const countOne = message.filter(el => el === 1).length;
+        return { countZero, countOne };
+    }
 
-  // start the server
-  const server = node.listen(BASE_NODE_PORT + nodeId, async () => {
-    console.log(
-      `Node ${nodeId} is listening on port ${BASE_NODE_PORT + nodeId}`
-    );
+    function determineNewValue(countZero: number, countOne: number): Value {
+        let newX: Value = "?";
+        if (countZero > (N / 2)) {
+            newX = 0;
+        } else if (countOne > (N / 2)) {
+            newX = 1;
+        }
+        return newX;
+    }
 
-    // the node is ready
-    setNodeIsReady(nodeId);
-  });
+    function sendProposalMessages(k: number, newX: Value) {
+        for (let i = 0; i < N; i++) {
+            sendMessage(i, k, newX, "P");
+        }
+    }
 
-  return server;
+    function sendRequestMessages(k: number, newX: Value) {
+        for (let i = 0; i < N; i++) {
+            sendMessage(i, k, newX, "R");
+        }
+    }
+
+    function sendMessage(destId: number, k: number, x: Value, messageType: string) {
+        try {
+            axios.post(`http://localhost:${BASE_NODE_PORT + destId}/message`, { k, x, messageType });
+        } catch (error) {
+            console.error(`Error sending message to node ${destId}: ${(error as Error).message}`);
+        }
+    }
+
+    node.get("/start", (req, res) => {
+        while (!nodesAreReady()) {
+            delay(5);
+        }
+
+        if (!isFaulty) {
+            nodeState.decided = false;
+            nodeState.x = initialValue;
+            nodeState.k = 1;
+            sendRequestMessages(nodeState.k, nodeState.x);
+        } else {
+            nodeState.decided = null;
+            nodeState.x = null;
+            nodeState.k = null;
+        }
+        res.status(200).send("started");
+    });
+
+    node.get("/stop", (req, res) => {
+        nodeState.killed = true;
+        res.status(200).send("killed");
+    });
+
+    node.get("/getState", (req, res) => {
+        res.status(200).send({ x: nodeState.x, k: nodeState.k, killed: nodeState.killed, decided: nodeState.decided });
+    });
+
+    const server = node.listen(BASE_NODE_PORT + nodeId, () => {
+        console.log(`Node ${nodeId} is listening on port ${BASE_NODE_PORT + nodeId}`);
+        setNodeIsReady(nodeId);
+    });
+
+    return server;
 }
