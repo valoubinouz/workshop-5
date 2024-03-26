@@ -54,7 +54,9 @@ export function node(
         if (messageR.length >= (N - F)) {
             const { countZero, countOne } = countOccurrences(messageR);
             const newX = determineNewValue(countZero, countOne);
-            sendProposalMessages(k, newX);
+            for (let i = 0; i < N; i++) {
+              sendMessage(i, k, newX, "P");
+          }
         }
     }
 
@@ -75,7 +77,9 @@ export function node(
             } else {
                 nodeState.x = determineNewValue(countZero, countOne);
                 nodeState.k = k + 1;
-                sendRequestMessages(nodeState.k, nodeState.x);
+                for (let i = 0; i < N; i++) {
+                  sendMessage(i, nodeState.k, nodeState.x, "R");
+              }
             }
         }
     }
@@ -95,19 +99,6 @@ export function node(
         }
         return newX;
     }
-
-    function sendProposalMessages(k: number, newX: Value) {
-        for (let i = 0; i < N; i++) {
-            sendMessage(i, k, newX, "P");
-        }
-    }
-
-    function sendRequestMessages(k: number, newX: Value) {
-        for (let i = 0; i < N; i++) {
-            sendMessage(i, k, newX, "R");
-        }
-    }
-
     function sendMessage(destId: number, k: number, x: Value, messageType: string) {
         try {
             axios.post(`http://localhost:${BASE_NODE_PORT + destId}/message`, { k, x, messageType });
@@ -125,7 +116,11 @@ export function node(
             nodeState.decided = false;
             nodeState.x = initialValue;
             nodeState.k = 1;
-            sendRequestMessages(nodeState.k, nodeState.x);
+
+            for (let i = 0; i < N; i++) {
+              sendMessage(i, nodeState.k, nodeState.x, "R");
+          }
+
         } else {
             nodeState.decided = null;
             nodeState.x = null;
